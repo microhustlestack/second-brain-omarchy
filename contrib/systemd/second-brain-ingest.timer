@@ -1,0 +1,13 @@
+[Unit]
+Description=Second Brain nightly batch ingestion at 02:00
+
+[Timer]
+# Scheduled batch option (alternative to the path watcher; enabling both
+# is safe because ingestion is delta-based and repeat runs are no-ops).
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=second-brain-ingest.service
+
+[Install]
+WantedBy=timers.target

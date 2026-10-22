@@ -1,0 +1,45 @@
+post_install() {
+  cat <<'EOF'
+
+  WSTUNLTD(TM) Second Brain Omarchy by JJUANtheBRAND(TM) installed.
+  Steps to a working system:
+
+    1. second-brain init                 (creates ~/SecondBrain)
+    1b. second-brain workspace init      (creates ~/agent-workspace, the
+                                          execution layer: workflow and
+                                          task folders with prompts.md,
+                                          tools.json, and data/ triads)
+    2. Install LM Studio if you have not yet (Omarchy menu: Install, AI,
+       LM Studio), then size and save your local model plan:
+         second-brain model --save
+         lms get <the recommended model>
+         lms server start
+    3. Install the CEREBRO scanner:
+         pipx install git+https://github.com/microhustlestack/cerebro-skill
+    4. Activate the agent skill (pick your agent):
+         OpenCode:    cp -r /usr/share/second-brain/skills/second-brain ~/.config/opencode/skills/
+         Claude Code: cp -r /usr/share/second-brain/skills/second-brain ~/.claude/skills/
+
+  Optional: weekly automatic lint:
+         systemctl --user enable --now second-brain-lint.timer
+
+  Optional: automatic ingestion (pick one, or enable both; ingestion is
+  delta-based so repeat triggers are no-ops):
+    Real-time, when a file lands in raw/:
+         systemctl --user enable --now second-brain-ingest.path
+    Nightly batch at 02:00:
+         systemctl --user enable --now second-brain-ingest.timer
+  For fully automatic processing, set an agent command first:
+         echo 'AGENT_CMD=opencode run "Read {PROMPT_FILE} and execute it"' \
+           >> ~/.config/second-brain/config
+  Without AGENT_CMD, triggers write an ingest queue into the vault's
+  output/ folder for your next manual agent run.
+
+EOF
+}
+
+post_upgrade() {
+  echo "  Second Brain upgraded. Your vault is a copy and is untouched."
+  echo "  Diff the new template against your SCHEMA.md if you customized it:"
+  echo "    diff -r /usr/share/second-brain/template ~/SecondBrain"
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WSTUNLTD™ Second Brain
+Comment=WSTUNLTD™ Second Brain Omarchy by JJUANtheBRAND™: open your Second Brain vault (PARA + LLM Wiki + Graph + CEREBRO)
+Exec=second-brain open
+Icon=accessories-text-editor
+Terminal=false
+Categories=Office;Utility;
+Keywords=notes;vault;obsidian;knowledge;brain;wstunltd;

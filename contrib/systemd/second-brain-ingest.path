@@ -1,0 +1,14 @@
+[Unit]
+Description=Second Brain event hook: watch raw/ for new files and ingest them
+
+[Path]
+# Event hook (real-time option). Fires second-brain-ingest.service when
+# files appear or change in the vault's raw/ folder.
+# Default vault path shown. If your vault lives elsewhere, override:
+#   systemctl --user edit second-brain-ingest.path
+DirectoryNotEmpty=%h/SecondBrain/raw
+PathChanged=%h/SecondBrain/raw
+Unit=second-brain-ingest.service
+
+[Install]
+WantedBy=paths.target

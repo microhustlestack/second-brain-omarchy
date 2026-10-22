@@ -1,0 +1,8 @@
+[Unit]
+Description=Second Brain weekly CEREBRO lint scan
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/second-brain scan
+# Packaged installs: ExecStart=/usr/bin/second-brain scan

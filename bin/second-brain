@@ -1,0 +1,650 @@
+#!/usr/bin/env bash
+# second-brain: scaffold and maintain a Second Brain vault on Omarchy.
+# Stack: PARA filing + LLM Wiki compilation + graph ontology + CEREBRO lint.
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/second-brain"
+CONFIG_FILE="$CONFIG_DIR/config"
+STATE_VAULT=""
+
+# Template resolution order: packaged install, local share, repo checkout.
+find_template() {
+  if [[ -n "${SECOND_BRAIN_TEMPLATE:-}" && -d "$SECOND_BRAIN_TEMPLATE" ]]; then
+    echo "$SECOND_BRAIN_TEMPLATE"; return 0
+  fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local candidates=(
+    "/usr/share/second-brain/template"
+    "$HOME/.local/share/second-brain/template"
+    "$script_dir/../share/template"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -d "$c" ]]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+save_config_value() {
+  # save_config_value KEY VALUE : set one key, preserving all other keys.
+  mkdir -p "$CONFIG_DIR"
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -f "$CONFIG_FILE" ]]; then grep -v "^$1=" "$CONFIG_FILE" > "$tmp" || true; fi
+  printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
+save_vault() { save_config_value VAULT "$1"; }
+
+config_value() {
+  # config_value KEY : print the value of KEY from the config file, if set.
+  if [[ -f "$CONFIG_FILE" ]]; then
+    grep "^$1=" "$CONFIG_FILE" | tail -1 | cut -d= -f2- || true
+  fi
+}
+
+load_vault() {
+  if [[ -n "${SECOND_BRAIN_HOME:-}" ]]; then STATE_VAULT="$SECOND_BRAIN_HOME"
+  elif [[ -f "$CONFIG_FILE" ]]; then
+    STATE_VAULT="$(grep '^VAULT=' "$CONFIG_FILE" | tail -1 | cut -d= -f2-)"
+  else STATE_VAULT="$HOME/SecondBrain"; fi
+}
+
+today() { date +%F; }
+
+slugify() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'
+}
+
+cmd_init() {
+  local target="$HOME/SecondBrain"
+  local owner="${USER:-$(id -un)}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) owner="$2"; shift 2 ;;
+      --*) echo "Unknown init option: $1" >&2; exit 2 ;;
+      *) target="$1"; shift ;;
+    esac
+  done
+  if [[ -e "$target" && -n "$(ls -A "$target" 2>/dev/null)" ]]; then
+    echo "Refusing to overwrite non-empty path: $target" >&2; exit 1
+  fi
+  local template
+  template="$(find_template)" || { echo "Template not found. Reinstall the package." >&2; exit 1; }
+  mkdir -p "$target"
+  cp -r "$template/." "$target/"
+  # Personalize placeholders.
+  find "$target" -name '*.md' -exec sed -i \
+    -e "s/{{OWNER}}/$owner/g" -e "s/{{DATE}}/$(today)/g" {} +
+  # Keep empty PARA and wiki dirs in version control if the user adds git.
+  find "$target" -type d -empty -exec touch {}/.gitkeep \;
+  save_vault "$target"
+  echo "Second Brain created at: $target"
+  echo "Owner: $owner"
+  echo
+  echo "Next steps:"
+  echo "  1. Open the vault in Obsidian (or any editor): second-brain open"
+  echo "  2. Point your agent (OpenCode, Claude Code) at the vault folder."
+  echo "     It will read AGENTS.md, then SCHEMA.md, automatically."
+  echo "  3. Drop your first 5 sources on ONE topic into raw/ and run:"
+  echo "     second-brain ingest"
+  echo "  4. Run a health check any time: second-brain scan"
+  echo "  5. Optional automation (see README): a systemd path watcher on raw/"
+  echo "     or a nightly timer runs ingest for you."
+}
+
+cmd_new() {
+  local kind="${1:-}" name="${2:-}"
+  if [[ -z "$kind" || -z "$name" ]]; then
+    echo "Usage: second-brain new project|person|org|concept|process \"Name\"" >&2; exit 2
+  fi
+  load_vault
+  local vault="$STATE_VAULT" dest template_file
+  case "$kind" in
+    project) dest="$vault/1-Projects/$(slugify "$name").md"; template_file="$vault/templates/project.md" ;;
+    person)  dest="$vault/wiki/people/$(slugify "$name").md";  template_file="$vault/templates/entity.md" ;;
+    org)     dest="$vault/wiki/orgs/$(slugify "$name").md";    template_file="$vault/templates/entity.md" ;;
+    concept) dest="$vault/wiki/concepts/$(slugify "$name").md"; template_file="$vault/templates/entity.md" ;;
+    process) dest="$vault/wiki/processes/$(slugify "$name").md"; template_file="$vault/templates/process.md" ;;
+    *) echo "Unknown kind: $kind" >&2; exit 2 ;;
+  esac
+  if [[ -e "$dest" ]]; then echo "Already exists: $dest" >&2; exit 1; fi
+  mkdir -p "$(dirname "$dest")"
+  sed -e "s/{{NAME}}/$name/g" -e "s/{{DATE}}/$(today)/g" "$template_file" > "$dest"
+  if [[ "$kind" == "org" ]]; then sed -i 's/^type: person/type: org/' "$dest"; fi
+  if [[ "$kind" == "concept" ]]; then sed -i 's/^type: person/type: concept/' "$dest"; fi
+  echo "- [[$name]] : $kind : created $(today) : ${dest#$vault/}" >> "$vault/index.md"
+  echo "Created: $dest"
+  echo "Indexed in index.md. Link it from related pages with [[$name]]."
+}
+
+cmd_ingest() {
+  local dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      *) echo "Unknown ingest option: $1" >&2; exit 2 ;;
+    esac
+  done
+  load_vault
+  local vault="$STATE_VAULT"
+  local raw_dir="$vault/raw" log_file="$vault/log.md"
+  if [[ ! -d "$raw_dir" ]]; then echo "No raw/ folder at: $raw_dir" >&2; exit 1; fi
+  [[ -f "$log_file" ]] || : > "$log_file"
+
+  # Delta detection: a raw file is processed only when log.md carries a
+  # ledger entry naming it (the agent writes "source: raw/<path>" lines
+  # on ingest, per SCHEMA.md). Anything else in raw/ is pending.
+  local pending=() rel
+  while IFS= read -r -d '' f; do
+    rel="${f#$raw_dir/}"
+    if ! grep -Fq "raw/$rel" "$log_file"; then pending+=("$rel"); fi
+  done < <(find "$raw_dir" -type f ! -name '.gitkeep' -print0 | sort -z)
+
+  if [[ ${#pending[@]} -eq 0 ]]; then
+    echo "Delta is empty. Every file in raw/ has a ledger entry in log.md."
+    return 0
+  fi
+
+  echo "Pending ingestion (${#pending[@]} file(s)):"
+  printf '  raw/%s\n' "${pending[@]}"
+  if [[ $dry_run -eq 1 ]]; then
+    echo "(dry run, nothing written)"
+    return 0
+  fi
+
+  local stamp outdir queue prompt_file
+  stamp="$(date +%F-%H%M%S)"
+  outdir="$vault/output"; mkdir -p "$outdir"
+  queue="$outdir/ingest-queue-$stamp.md"
+  prompt_file="$outdir/ingest-prompt-$stamp.md"
+  {
+    echo "# Ingest queue: $stamp"
+    echo
+    echo "Vault: $vault"
+    echo "Pending files (not yet recorded in log.md):"
+    printf -- '- raw/%s\n' "${pending[@]}"
+  } > "$queue"
+
+  {
+    echo "You are the ingestion agent for the Second Brain vault at: $vault"
+    echo
+    echo "Protocol (from SCHEMA.md, follow exactly):"
+    echo "1. Read SCHEMA.md, then index.md, then log.md. Note existing entities"
+    echo "   so you update pages instead of creating fragmented duplicates."
+    echo "2. For each pending file below: read it in raw/ (never edit raw/),"
+    echo "   extract entities and claims, write or update the wiki/ and PARA"
+    echo "   pages, inject [[wikilinks]] with verbs from graph/ontology.md,"
+    echo "   add triples to graph/edges.md, and update index.md."
+    echo "3. Append one ledger entry per file to log.md in this format:"
+    echo "   ## YYYY-MM-DD HH:MM ingest"
+    echo "   - source: raw/<path>"
+    echo "   - pages: [[Page One]], [[Page Two]]"
+    echo "   - links: [[A]] -> [[B]] (verb)"
+    echo "4. A file only counts as processed once its ledger entry exists."
+    echo
+    echo "Pending files:"
+    printf -- '- raw/%s\n' "${pending[@]}"
+  } > "$prompt_file"
+
+  local agent_cmd="${SECOND_BRAIN_AGENT_CMD:-}"
+  if [[ -z "$agent_cmd" ]]; then agent_cmd="$(config_value AGENT_CMD)"; fi
+
+  if [[ -z "$agent_cmd" ]]; then
+    echo
+    echo "No agent command configured. Queue written, nothing processed:"
+    echo "  Queue:  $queue"
+    echo "  Prompt: $prompt_file"
+    echo "Hand the prompt file to your agent, or set one and rerun:"
+    echo "  echo 'AGENT_CMD=opencode run \"Read {PROMPT_FILE} and execute it\"' >> $CONFIG_FILE"
+    return 0
+  fi
+
+  local rendered="${agent_cmd//\{VAULT\}/$vault}"
+  rendered="${rendered//\{PROMPT_FILE\}/$prompt_file}"
+  rendered="${rendered//\{QUEUE\}/$queue}"
+  echo
+  echo "Running agent: $rendered"
+  if ! bash -c "$rendered"; then
+    echo "Agent exited with an error. Files stay in the delta and will be" >&2
+    echo "retried on the next run. Queue: $queue" >&2
+    return 1
+  fi
+
+  # Verify by ledger, not by agent exit code: recount the delta.
+  local still=0
+  for rel in "${pending[@]}"; do
+    grep -Fq "raw/$rel" "$log_file" || still=$((still + 1))
+  done
+  if [[ $still -eq 0 ]]; then
+    echo "Ingest complete. All ${#pending[@]} file(s) now have ledger entries in log.md."
+  else
+    echo "Agent finished, but $still file(s) still have no ledger entry." >&2
+    echo "They remain in the delta and will be retried next run." >&2
+    return 1
+  fi
+}
+
+find_workspace_template() {
+  if [[ -n "${SECOND_BRAIN_WORKSPACE_TEMPLATE:-}" && -d "$SECOND_BRAIN_WORKSPACE_TEMPLATE" ]]; then
+    echo "$SECOND_BRAIN_WORKSPACE_TEMPLATE"; return 0
+  fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local candidates=(
+    "/usr/share/second-brain/agent-workspace"
+    "$HOME/.local/share/second-brain/agent-workspace"
+    "$script_dir/../share/agent-workspace"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -d "$c" ]]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+load_workspace() {
+  if [[ -n "${SECOND_BRAIN_WORKSPACE:-}" ]]; then STATE_WORKSPACE="$SECOND_BRAIN_WORKSPACE"
+  elif [[ -n "$(config_value WORKSPACE)" ]]; then STATE_WORKSPACE="$(config_value WORKSPACE)"
+  else STATE_WORKSPACE="$HOME/agent-workspace"; fi
+}
+STATE_WORKSPACE=""
+
+workspace_new_task_into() {
+  # workspace_new_task_into DEST_DIR NAME WORKFLOW_LABEL
+  local dest="$1" name="$2" workflow_label="$3"
+  local template
+  template="$(find_workspace_template)" || { echo "Workspace template not found. Reinstall the package." >&2; exit 1; }
+  if [[ -e "$dest" ]]; then echo "Already exists: $dest" >&2; exit 1; fi
+  mkdir -p "$dest"
+  cp -r "$template/_templates/task/." "$dest/"
+  find "$dest" -type f -exec sed -i \
+    -e "s/{{NAME}}/$name/g" -e "s/{{WORKFLOW}}/$workflow_label/g" \
+    -e "s/{{DATE}}/$(today)/g" {} +
+  touch "$dest/data/.gitkeep"
+  echo "Created task folder: $dest"
+  echo "Triad in place: prompts.md, tools.json, data/"
+}
+
+cmd_workspace() {
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
+    init)
+      local target="$HOME/agent-workspace"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --*) echo "Unknown workspace init option: $1" >&2; exit 2 ;;
+          *) target="$1"; shift ;;
+        esac
+      done
+      if [[ -e "$target" && -n "$(ls -A "$target" 2>/dev/null)" ]]; then
+        echo "Refusing to overwrite non-empty path: $target" >&2; exit 1
+      fi
+      local template
+      template="$(find_workspace_template)" || { echo "Workspace template not found. Reinstall the package." >&2; exit 1; }
+      mkdir -p "$target"
+      cp -r "$template/." "$target/"
+      find "$target" -name '*.md' -exec sed -i "s/{{DATE}}/$(today)/g" {} +
+      find "$target" -type d -empty -exec touch {}/.gitkeep \;
+      save_config_value WORKSPACE "$target"
+      echo "Agent workspace created at: $target"
+      echo "Includes example-workflow/ (working triad example) and _templates/."
+      echo "Audit it any time: second-brain workspace check"
+      ;;
+    new)
+      local kind="${1:-}"; shift || true
+      load_workspace
+      local ws="$STATE_WORKSPACE"
+      case "$kind" in
+        workflow)
+          local name="${1:-}"
+          [[ -n "$name" ]] || { echo "Usage: second-brain workspace new workflow \"Name\"" >&2; exit 2; }
+          local dir="$ws/$(slugify "$name")"
+          [[ ! -e "$dir" ]] || { echo "Already exists: $dir" >&2; exit 1; }
+          mkdir -p "$dir"
+          {
+            echo "# Workflow: $name"
+            echo
+            echo "Created: $(today)"
+            echo
+            echo "Purpose: one paragraph on what this workflow produces."
+            echo
+            echo "Tasks: (added with: second-brain workspace new task $(slugify "$name") \"Task Name\")"
+          } > "$dir/WORKFLOW.md"
+          echo "Created workflow: $dir"
+          ;;
+        task)
+          local workflow_slug="${1:-}" name="${2:-}"
+          [[ -n "$workflow_slug" && -n "$name" ]] || { echo "Usage: second-brain workspace new task <workflow-slug> \"Name\"" >&2; exit 2; }
+          [[ -d "$ws/$workflow_slug" ]] || { echo "Workflow not found: $ws/$workflow_slug" >&2; exit 1; }
+          workspace_new_task_into "$ws/$workflow_slug/$(slugify "$name")" "$name" "$workflow_slug"
+          ;;
+        subtask)
+          local workflow_slug="${1:-}" task_slug="${2:-}" name="${3:-}"
+          [[ -n "$workflow_slug" && -n "$task_slug" && -n "$name" ]] || { echo "Usage: second-brain workspace new subtask <workflow-slug> <task-slug> \"Name\"" >&2; exit 2; }
+          [[ -d "$ws/$workflow_slug/$task_slug" ]] || { echo "Task not found: $ws/$workflow_slug/$task_slug" >&2; exit 1; }
+          workspace_new_task_into "$ws/$workflow_slug/$task_slug/$(slugify "$name")" "$name" "$workflow_slug"
+          ;;
+        *) echo "Usage: second-brain workspace new workflow|task|subtask ..." >&2; exit 2 ;;
+      esac
+      ;;
+    check)
+      local strict=0 target=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --strict) strict=1; shift ;;
+          *) target="$1"; shift ;;
+        esac
+      done
+      if [[ -z "$target" ]]; then load_workspace; target="$STATE_WORKSPACE"; fi
+      [[ -d "$target" ]] || { echo "Workspace not found: $target" >&2; exit 1; }
+      echo "Workspace check: $target"
+      local errors=0 warnings=0 nodes=0 dir rel depth
+      # Workflow containers (depth 1, excluding _templates).
+      while IFS= read -r -d '' dir; do
+        rel="${dir#$target/}"
+        if [[ ! -f "$dir/WORKFLOW.md" ]]; then
+          echo "  warn   $rel: no WORKFLOW.md (workflow containers should describe themselves)"
+          warnings=$((warnings + 1))
+        fi
+      done < <(find "$target" -mindepth 1 -maxdepth 1 -type d ! -name '_templates' -print0)
+      # Task and subtask nodes (depth 2 and 3, excluding data/ contents).
+      while IFS= read -r -d '' dir; do
+        rel="${dir#$target/}"
+        case "$rel" in */data|*/data/*) continue ;; esac
+        nodes=$((nodes + 1))
+        local missing=""
+        [[ -f "$dir/prompts.md" ]] || missing="$missing prompts.md"
+        [[ -f "$dir/tools.json" ]] || missing="$missing tools.json"
+        [[ -d "$dir/data" ]] || missing="$missing data/"
+        if [[ -n "$missing" ]]; then
+          echo "  ERROR  $rel: incomplete triad, missing:$missing"
+          errors=$((errors + 1))
+          continue
+        fi
+        if ! python3 -m json.tool "$dir/tools.json" >/dev/null 2>&1; then
+          echo "  ERROR  $rel: tools.json is not valid JSON"
+          errors=$((errors + 1))
+          continue
+        fi
+        local proposed
+        proposed="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for t in d.get("tools",[]) if t.get("status")=="proposed"))' "$dir/tools.json")"
+        if [[ "$proposed" -gt 0 ]]; then
+          echo "  warn   $rel: $proposed proposed tool(s) in tools.json awaiting owner approval (not executable)"
+          warnings=$((warnings + 1))
+        fi
+        echo "  ok     $rel"
+      done < <(find "$target" -mindepth 2 -maxdepth 3 -type d ! -path "$target/_templates*" -print0 | sort -z)
+      echo "Nodes checked: $nodes. Errors: $errors. Warnings: $warnings."
+      if [[ $errors -gt 0 ]]; then return 1; fi
+      if [[ $strict -eq 1 && $warnings -gt 0 ]]; then
+        echo "Strict mode: warnings fail the check."
+        return 1
+      fi
+      return 0
+      ;;
+    path)
+      load_workspace
+      echo "$STATE_WORKSPACE"
+      ;;
+    *)
+      cat <<'EOF'
+Usage:
+  second-brain workspace init [path]                       Create agent-workspace from the template
+  second-brain workspace new workflow "Name"               New workflow container
+  second-brain workspace new task <workflow> "Name"        New task folder (full triad)
+  second-brain workspace new subtask <wf> <task> "Name"    New subtask folder (full triad)
+  second-brain workspace check [path] [--strict]           Audit triads, tools.json, approvals
+  second-brain workspace path                              Print the workspace path
+EOF
+      ;;
+  esac
+}
+
+cmd_model() {
+  local save=0 mode=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --save) save=1; shift ;;
+      --mode) mode="$2"; shift 2 ;;
+      *) echo "Unknown model option: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  # Capacity detection. SECOND_BRAIN_RAM_GB overrides detection (VMs and
+  # pre-purchase planning); otherwise read /proc/meminfo.
+  local ram_gb
+  if [[ -n "${SECOND_BRAIN_RAM_GB:-}" ]]; then
+    ram_gb="$SECOND_BRAIN_RAM_GB"
+  else
+    local kb
+    kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+    ram_gb=$(( (kb + 524288) / 1048576 ))
+  fi
+  local cores
+  cores="$(nproc 2>/dev/null || echo 1)"
+  local vram_gb=0 gpu="none detected (CPU inference)"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local mb
+    mb="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+    if [[ -n "$mb" && "$mb" =~ ^[0-9]+$ ]]; then
+      vram_gb=$(( (mb + 512) / 1024 ))
+      gpu="NVIDIA, ${vram_gb}GB VRAM"
+    fi
+  fi
+
+  # Sizing rule: leave the OS and desktop roughly a quarter of RAM (min
+  # 4GB). On GPU machines the model should also fit VRAM for full speed;
+  # the tiers below are conservative for refurbished hardware.
+  local tier model_id model_desc approx
+  if [[ "$ram_gb" -le 4 ]]; then
+    tier="minimal"; model_id="qwen/qwen3-1.7b"; approx="~1.2GB download"
+    model_desc="Qwen3 1.7B (Q4). Works, but expect slow, short answers. Usable for ingest triage only."
+  elif [[ "$ram_gb" -le 8 ]]; then
+    tier="small (8GB class)"; model_id="qwen/qwen3-4b"; approx="~2.5GB download"
+    model_desc="Qwen3 4B (Q4_K_M). The validated floor for this system: chat, ingest, and summaries on 8GB machines like the 2018 Mac Mini."
+  elif [[ "$ram_gb" -le 16 ]]; then
+    tier="mainstream (16GB class)"; model_id="qwen/qwen3-8b"; approx="~5GB download"
+    model_desc="Qwen3 8B (Q4_K_M). The sweet spot for most new and refurbished machines: full ingest, query, and task execution."
+  elif [[ "$ram_gb" -le 32 ]]; then
+    tier="strong (32GB class)"; model_id="qwen/qwen3-14b"; approx="~9GB download"
+    model_desc="Qwen3 14B (Q4_K_M). Noticeably better synthesis and multi-page reasoning for lint and planning work."
+  elif [[ "$ram_gb" -le 64 ]]; then
+    tier="workstation (64GB class)"; model_id="qwen/qwen3-32b"; approx="~20GB download"
+    model_desc="Qwen3 32B (Q4_K_M). Studio class machines (for example a 64GB Mac Pro) run this comfortably on CPU or GPU."
+  else
+    tier="max (over 64GB)"; model_id="qwen/qwen3-32b"; approx="~20GB download at Q4, ~38GB at Q8"
+    model_desc="Qwen3 32B at Q5 or Q8 for quality headroom, or a 70B class model at Q4 if disk and patience allow."
+  fi
+  if [[ "$vram_gb" -gt 0 && "$vram_gb" -lt 8 && "$ram_gb" -gt 16 ]]; then
+    model_desc="$model_desc Note: with under 8GB VRAM the model will partly run on CPU. That is fine for this system, just slower."
+  fi
+
+  local current_mode
+  current_mode="$(config_value MODEL_MODE)"
+  if [[ -n "$mode" ]]; then current_mode="$mode"; fi
+  if [[ -z "$current_mode" ]]; then current_mode="local"; fi
+  case "$current_mode" in
+    local|hybrid) ;;
+    *) echo "Invalid mode: $current_mode (use local or hybrid)" >&2; exit 2 ;;
+  esac
+
+  echo "Machine capacity"
+  echo "  RAM:  ${ram_gb}GB"
+  echo "  CPU:  ${cores} cores"
+  echo "  GPU:  ${gpu}"
+  echo
+  echo "Recommended local model (LM Studio): tier $tier"
+  echo "  $model_desc"
+  echo "  Approx size: $approx"
+  echo
+  echo "Set it up (LM Studio is offered in Omarchy's install menu, AI section):"
+  echo "  lms get $model_id"
+  echo "  lms server start            # OpenAI-compatible API at http://localhost:1234/v1"
+  echo "  lms load $model_id"
+  echo "Point your agent (OpenCode and friends) at http://localhost:1234/v1"
+  echo "with model $model_id. No API key is needed for local mode."
+  echo
+  echo "Mode: $current_mode"
+  if [[ "$current_mode" == "hybrid" ]]; then
+    echo "  Hybrid: local model handles ingest, query, and daily tasks."
+    echo "  Add YOUR OWN official cloud API key in your agent's config for"
+    echo "  bigger jobs (long synthesis, hard planning). Keys are never"
+    echo "  stored in the vault, and no proxy or resold-key tools, ever."
+  else
+    echo "  Local only: everything runs on this machine, works offline."
+    echo "  Switch any time: second-brain model --mode hybrid --save"
+  fi
+
+  if [[ $save -eq 1 ]]; then
+    save_config_value MODEL_MODE "$current_mode"
+    save_config_value RECOMMENDED_MODEL "$model_id"
+    save_config_value MODEL_TIER "$tier"
+    echo
+    echo "Saved to $CONFIG_FILE: MODEL_MODE=$current_mode, RECOMMENDED_MODEL=$model_id"
+  fi
+}
+
+cmd_scan() {
+  load_vault
+  local vault="$STATE_VAULT"
+  local outdir="$vault/output"; mkdir -p "$outdir"
+  local report="$outdir/cerebro-$(today).md"
+  if command -v cerebro >/dev/null 2>&1; then
+    cerebro "$vault" --gaps --report "$report" --quiet
+    cerebro "$vault" "$outdir/vault-index.json" --gaps --quiet || true
+    echo "CEREBRO report: $report"
+    echo "JSON index:     $outdir/vault-index.json"
+    echo "Work the report with your agent: unresolved entities are the"
+    echo "ingest to-do list, orphans need a link or the archive."
+  else
+    echo "CEREBRO is not installed. Install it (Python 3.11+, pipx route):" >&2
+    echo "  pipx install git+https://github.com/microhustlestack/cerebro-skill" >&2
+    echo "Then run: second-brain scan" >&2
+    exit 1
+  fi
+}
+
+cmd_open() {
+  load_vault
+  local vault="$STATE_VAULT"
+  if command -v obsidian >/dev/null 2>&1; then
+    obsidian "obsidian://open?path=$vault" >/dev/null 2>&1 &
+    echo "Opening vault in Obsidian: $vault"
+  else
+    xdg-open "$vault" >/dev/null 2>&1 &
+    echo "Obsidian not found, opened folder instead: $vault"
+    echo "Tip: Omarchy ships Obsidian. Install with: omarchy-pkg-add obsidian"
+  fi
+}
+
+cmd_status() {
+  load_vault
+  local vault="$STATE_VAULT"
+  echo "Vault: $vault"
+  if [[ ! -d "$vault" ]]; then echo "No vault yet. Run: second-brain init" ; return 0; fi
+  local total
+  total="$(find "$vault" -name '*.md' | wc -l)"
+  echo "Markdown pages: $total"
+  for d in 1-Projects 2-Areas 3-Resources 4-Archives raw wiki; do
+    printf '  %-14s %s files\n' "$d" "$(find "$vault/$d" -type f 2>/dev/null | wc -l)"
+  done
+  echo "Last log entry:"
+  grep '^## ' "$vault/log.md" | tail -1 | sed 's/^/  /' || true
+  # Pending ingestion delta (same detection as cmd_ingest).
+  local pending_count=0 rel f
+  if [[ -d "$vault/raw" ]]; then
+    while IFS= read -r -d '' f; do
+      rel="${f#$vault/raw/}"
+      grep -Fq "raw/$rel" "$vault/log.md" || pending_count=$((pending_count + 1))
+    done < <(find "$vault/raw" -type f ! -name '.gitkeep' -print0)
+  fi
+  echo "Pending ingestion: $pending_count file(s) in raw/ (run: second-brain ingest)"
+}
+
+cmd_doctor() {
+  echo "Second Brain doctor"
+  local ok=0
+  check() {
+    if command -v "$1" >/dev/null 2>&1; then echo "  ok       $1 ($2)"; else echo "  MISSING  $1 : $2"; ok=1; fi
+  }
+  check python3 "required by CEREBRO"
+  check pipx "installs CEREBRO the Arch-safe way (PEP 668)"
+  check cerebro "vault scanner. Install: pipx install git+https://github.com/microhustlestack/cerebro-skill"
+  if command -v lms >/dev/null 2>&1 || command -v lm-studio >/dev/null 2>&1 || command -v lmstudio >/dev/null 2>&1; then
+    echo "  ok       LM Studio (local model runtime, Omarchy AI menu)"
+  else
+    echo "  MISSING  LM Studio : local model runtime. Install via Omarchy menu: Install, AI, LM Studio"
+    ok=1
+  fi
+  check opencode "agent engine on Omarchy AI appliances (any agent works)"
+  check obsidian "optional vault viewer and graph view"
+  check gum "optional nicer prompts, Omarchy ships it"
+  find_template >/dev/null && echo "  ok       template ($(find_template))" || { echo "  MISSING  template files"; ok=1; }
+  find_workspace_template >/dev/null && echo "  ok       workspace template ($(find_workspace_template))" || { echo "  MISSING  agent-workspace template files"; ok=1; }
+  load_workspace
+  if [[ -d "$STATE_WORKSPACE" ]]; then echo "  ok       agent workspace at $STATE_WORKSPACE"; else echo "  note     no agent workspace yet: second-brain workspace init"; fi
+  local agent_cmd="${SECOND_BRAIN_AGENT_CMD:-}"
+  if [[ -z "$agent_cmd" ]]; then agent_cmd="$(config_value AGENT_CMD)"; fi
+  if [[ -n "$agent_cmd" ]]; then
+    echo "  ok       AGENT_CMD configured (automatic ingest can run an agent)"
+  else
+    echo "  note     AGENT_CMD not set: ingest writes a queue for manual agent runs"
+  fi
+  local rec_model rec_mode
+  rec_model="$(config_value RECOMMENDED_MODEL)"
+  rec_mode="$(config_value MODEL_MODE)"
+  if [[ -n "$rec_model" ]]; then
+    echo "  ok       model plan saved: $rec_model (mode: ${rec_mode:-local}). Rerun or change: second-brain model"
+  else
+    echo "  note     no model plan saved yet: second-brain model --save"
+  fi
+  if systemctl --user list-unit-files second-brain-ingest.path >/dev/null 2>&1; then
+    echo "  ok       systemd ingest units installed (enable path watcher or timer, see README)"
+  else
+    echo "  note     systemd ingest units not visible in this session"
+  fi
+  return $ok
+}
+
+usage() {
+  cat <<'EOF'
+WSTUNLTD(TM) Second Brain Omarchy by JJUANtheBRAND(TM)
+second-brain: PARA + LLM Wiki + Graph + CEREBRO + agent workspace, for Omarchy.
+
+Usage:
+  second-brain init [path] [--name "Your Name"]  Create a vault from the template
+  second-brain new <kind> "Name"                 project | person | org | concept | process
+  second-brain ingest [--dry-run]                Process new raw/ files (delta vs log.md)
+  second-brain workspace <cmd>                   Execution layer: init | new | check | path
+  second-brain model [--mode local|hybrid] [--save]  Recommend an LM Studio model for this machine
+  second-brain scan                              CEREBRO gap scan into output/
+  second-brain status                            Vault counts and last log entry
+  second-brain open                              Open the vault (Obsidian if present)
+  second-brain doctor                            Check dependencies
+  second-brain help                              This text
+
+Environment:
+  SECOND_BRAIN_HOME      Vault path (overrides saved config)
+  SECOND_BRAIN_TEMPLATE  Template path (overrides packaged template)
+  SECOND_BRAIN_AGENT_CMD Agent command template for ingest. Placeholders:
+                         {VAULT}, {PROMPT_FILE}, {QUEUE}. Can also be set as
+                         AGENT_CMD= in ~/.config/second-brain/config.
+EOF
+}
+
+case "${1:-help}" in
+  init) shift; cmd_init "$@" ;;
+  new) shift; cmd_new "$@" ;;
+  ingest) shift; cmd_ingest "$@" ;;
+  workspace) shift; cmd_workspace "$@" ;;
+  model) shift; cmd_model "$@" ;;
+  scan|lint) shift; cmd_scan ;;
+  open) shift; cmd_open ;;
+  status) shift; cmd_status ;;
+  doctor) shift; cmd_doctor ;;
+  help|-h|--help) usage ;;
+  *) echo "Unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac

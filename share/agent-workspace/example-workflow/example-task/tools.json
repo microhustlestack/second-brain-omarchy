@@ -1,0 +1,1 @@
+{"notes":"Read-only vault access is the only tool this example needs. It runs under any agent runtime with zero folder changes, which is the durability point.","task":"example-task","tools":[{"name":"second-brain-vault","ref":"Read-only context from the Second Brain vault via its index.md","status":"approved","type":"files"}],"workflow":"example-workflow"}

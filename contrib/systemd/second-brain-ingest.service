@@ -1,0 +1,15 @@
+[Unit]
+Description=Second Brain ingestion: process new files in raw/ (delta vs log.md)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/second-brain ingest
+# User install via install.sh (paths rewritten on install):
+# ExecStart=%h/.local/bin/second-brain ingest
+#
+# Behavior: with AGENT_CMD set in ~/.config/second-brain/config (or
+# SECOND_BRAIN_AGENT_CMD), the configured agent processes the delta.
+# Without one, ingest writes a queue and prompt into the vault's output/
+# folder for the next manual agent run. Either way it is safe to trigger
+# often: the delta check makes repeat runs no-ops.
