@@ -1,0 +1,6 @@
+[Unit]
+Description=Local AI batch tags and entities for Second Brain vault
+
+[Service]
+Type=oneshot
+ExecStart=%h/local-ai/local-ai batch --all

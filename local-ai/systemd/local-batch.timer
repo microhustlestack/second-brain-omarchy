@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly local AI batch, Sunday 02:00
+
+[Timer]
+OnCalendar=Sun 02:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

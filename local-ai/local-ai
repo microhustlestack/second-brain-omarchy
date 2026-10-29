@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""local-ai v2: optimized direct use of the local Qwen3 4B model via LM Studio.
+Router v2 checks RAM and task size before choosing local vs cloud, caches
+repeat jobs locally, and enforces a green/yellow/red Trust Layer gate.
+No agent loop, no thinking mode for short jobs, no cloud call from this script."""
+import hashlib, json, os, re, subprocess, sys, time, urllib.request
+from pathlib import Path
+
+API = "http://localhost:1234/v1/chat/completions"
+MODELS = "http://localhost:1234/v1/models"
+MODEL = "qwen/qwen3-4b"
+HOME = Path.home()
+VAULT = HOME / "SecondBrain"
+BASE = HOME / "local-ai"
+CACHE_DIR = BASE / "cache"
+AUDIT_LOG = BASE / "audit.log"
+POLICY_FILE = BASE / "policy.json"
+STOP = {"what","when","where","which","with","from","about","that","this","there","here","have","been","will","would","should","your","their"}
+
+def mem_available_gb():
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return round(int(line.split()[1]) / 1000000, 2)
+    except Exception:
+        pass
+    return 0.0
+
+def load_policy():
+    default = {"green": ["read", "summarize", "tags", "entities", "search", "list", "triage"], "yellow": ["write vault", "edit vault", "external message", "system change"], "red": ["delete", "money", "credentials", "send payment", "sudo"], "yellow_allowed_patterns": []}
+    if not POLICY_FILE.exists():
+        POLICY_FILE.write_text(json.dumps(default, indent=2))
+        return default
+    try:
+        return json.loads(POLICY_FILE.read_text())
+    except Exception:
+        return default
+
+def audit(tier, action, result):
+    BASE.mkdir(parents=True, exist_ok=True)
+    with open(AUDIT_LOG, "a") as f:
+        f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "tier": tier, "action": action, "result": result}) + "\n")
+
+def ensure_model():
+    try:
+        with urllib.request.urlopen(MODELS, timeout=3) as r:
+            if MODEL in r.read().decode():
+                return True
+    except Exception:
+        pass
+    env = dict(os.environ)
+    env["PATH"] = str(HOME / ".lmstudio" / "bin") + ":" + env.get("PATH", "")
+    subprocess.run(["lms", "server", "start"], env=env, capture_output=True, text=True)
+    subprocess.run(["lms", "load", MODEL, "-y"], env=env, capture_output=True, text=True)
+    for _ in range(10):
+        time.sleep(2)
+        try:
+            with urllib.request.urlopen(MODELS, timeout=3) as r:
+                if MODEL in r.read().decode():
+                    return True
+        except Exception:
+            continue
+    print("Local model is not responding on port 1234. Start it with: lms server start && lms load qwen/qwen3-4b", file=sys.stderr)
+    return False
+
+def model_ok():
+    try:
+        with urllib.request.urlopen(MODELS, timeout=3) as r:
+            return MODEL in r.read().decode()
+    except Exception:
+        return False
+
+def chat(prompt, max_tokens=120, temperature=0):
+    body = json.dumps({"model": MODEL, "messages": [{"role": "user", "content": "/no_think " + prompt}], "max_tokens": max_tokens, "temperature": temperature}).encode()
+    req = urllib.request.Request(API, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        data = json.load(r)
+    text = data["choices"][0]["message"]["content"].strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text).strip()
+    return text
+
+def chat_cached(prompt, max_tokens=120, use_cache=True):
+    if not use_cache:
+        t = time.time(); return chat(prompt, max_tokens), round(time.time() - t, 1), False
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(f"{MODEL}|{max_tokens}|{prompt}".encode()).hexdigest()
+    f = CACHE_DIR / f"{key}.json"
+    if f.exists() and time.time() - f.stat().st_mtime < 7 * 86400:
+        try:
+            return json.loads(f.read_text())["output"], 0.0, True
+        except Exception:
+            pass
+    t = time.time(); out = chat(prompt, max_tokens); secs = round(time.time() - t, 1)
+    f.write_text(json.dumps({"prompt": prompt[:500], "output": out, "time": time.strftime("%Y-%m-%d %H:%M:%S")}))
+    return out, secs, False
+
+def extract_text(path, limit=8000):
+    p = Path(path).expanduser()
+    if not p.exists():
+        print(f"File not found: {p}", file=sys.stderr); sys.exit(1)
+    if p.suffix.lower() == ".pdf":
+        out = subprocess.run(["pdftotext", "-layout", str(p), "-"], capture_output=True, text=True)
+        text = out.stdout
+    else:
+        text = p.read_text(errors="ignore")
+    return text[:limit]
+
+def route_decision(text):
+    ram = mem_available_gb(); est = max(1, len(text) // 4)
+    if ram < 1.0:
+        return {"decision": "wait", "reason": "Less than 1GB RAM available, free RAM first (close browser/GUI apps or unload the model).", "ram_gb": ram, "est_tokens": est}
+    if est < 500:
+        return {"decision": "local-small", "reason": "Short job, local 4B direct is fastest and private.", "ram_gb": ram, "est_tokens": est, "suggested": "local-ai ask / tags / summarize"}
+    if est < 2000:
+        return {"decision": "local", "reason": "Medium job, local 4B direct with chunked input.", "ram_gb": ram, "est_tokens": est, "suggested": "local-ai summarize / triage"}
+    return {"decision": "cloud-recommended", "reason": "Long or complex job, local 4B would be slow and context-tight. Use free cloud opencode model for synthesis, local only for triage.", "ram_gb": ram, "est_tokens": est, "suggested": "opencode run -m opencode/glm-5.3-flash-free"}
+
+def usage():
+    print("Usage: local-ai ask \"prompt\" | json \"instruction\" [file] | summarize <file> | tags <file> | entities <file> | private <file> | triage <file> | qa \"question\" [page] | batch [--limit N] [--all] | demo | route \"prompt\" [file] [--dry-run] [--cloud] | gate <green|yellow|red> \"<action>\" [--approve \"<exact action>\"] | audit | doctor | bench | cache-stats")
+    sys.exit(2)
+
+def main():
+    if len(sys.argv) < 2:
+        usage()
+    cmd = sys.argv[1]
+    # Commands that do not need the model loaded
+    if cmd == "gate":
+        if len(sys.argv) < 4: usage()
+        tier, action = sys.argv[2], sys.argv[3]
+        approve = sys.argv[sys.argv.index("--approve") + 1] if "--approve" in sys.argv else None
+        policy = load_policy()
+        if tier == "green":
+            audit(tier, action, "ALLOW"); print("ALLOW (green, read-only)"); return
+        if tier == "yellow":
+            allowed = any(p.lower() in action.lower() for p in policy.get("yellow_allowed_patterns", []))
+            if allowed or approve == action:
+                audit(tier, action, "ALLOW"); print("ALLOW (yellow, policy match or explicit approval)"); return
+            audit(tier, action, "DENY"); print("DENY (yellow). Add a pattern to policy.json, or rerun with --approve and the exact action."); sys.exit(1)
+        if tier == "red":
+            if approve == action:
+                audit(tier, action, "ALLOW-APPROVED"); print("ALLOW (red, explicit approval recorded)"); return
+            audit(tier, action, "DENY"); print("DENY (red). Rerun with --approve and the exact action."); sys.exit(1)
+        print("Tier must be green, yellow, or red."); sys.exit(2)
+    if cmd == "audit":
+        if AUDIT_LOG.exists():
+            print("\n".join(AUDIT_LOG.read_text().splitlines()[-20:]))
+        else:
+            print("No audit entries yet.")
+        return
+    if cmd == "doctor":
+        print(f"RAM available: {mem_available_gb()} GB")
+        print(f"Local model loaded: {model_ok()} ({MODEL}, localhost:1234)")
+        print(f"Policy file: {POLICY_FILE.exists()} ({POLICY_FILE})")
+        if CACHE_DIR.exists():
+            files = list(CACHE_DIR.glob("*.json")); print(f"Cache: {len(files)} entries, {sum(f.stat().st_size for f in files)//1024} KB")
+        else:
+            print("Cache: 0 entries")
+        print(f"Vault: {VAULT} exists={VAULT.exists()}")
+        try:
+            out = subprocess.run(["df", "-h", str(HOME)], capture_output=True, text=True).stdout.splitlines()[-1]
+            print(f"Disk home: {out}")
+        except Exception:
+            pass
+        return
+    if cmd == "cache-stats":
+        if CACHE_DIR.exists():
+            files = list(CACHE_DIR.glob("*.json")); print(f"Cache entries: {len(files)}, size: {sum(f.stat().st_size for f in files)//1024} KB, dir: {CACHE_DIR}")
+        else:
+            print("Cache: 0 entries")
+        return
+    if cmd == "route" and "--dry-run" in sys.argv:
+        args = [a for a in sys.argv[2:] if a != "--dry-run"]
+        text = args[0] + (extract_text(args[1], 8000) if len(args) > 1 else "")
+        print(json.dumps(route_decision(text), indent=2)); return
+    if not ensure_model():
+        sys.exit(1)
+    if cmd == "ask":
+        if len(sys.argv) < 3: usage()
+        out, s, cached = chat_cached(sys.argv[2], 200); print(out); print(f"\n[local, {s}s{' cached' if cached else ''}]")
+    elif cmd == "json":
+        if len(sys.argv) < 3: usage()
+        text = extract_text(sys.argv[3], 4000) if len(sys.argv) > 3 else ""
+        out, s, cached = chat_cached(f"Return JSON only. {sys.argv[2]}\n\nText:\n{text}", 200); print(out); print(f"\n[local, {s}s{' cached' if cached else ''}]")
+    elif cmd in ("summarize", "tags", "entities"):
+        if len(sys.argv) < 3: usage()
+        limit = 6000 if cmd == "summarize" else 4000
+        text = extract_text(sys.argv[2], limit)
+        prompts = {"summarize": "Summarize this text in 3 sentences or fewer.", "tags": "Return JSON only: {\"tags\": [up to 5 short tags]}", "entities": "Return JSON only: {\"entities\": [up to 10 people, orgs, or concepts named in the text]}"}
+        out, s, cached = chat_cached(prompts[cmd] + "\n\nText:\n" + text, 200); print(out); print(f"\n[local, {s}s{' cached' if cached else ''}]")
+    elif cmd == "private":
+        if len(sys.argv) < 3: usage()
+        p = Path(sys.argv[2]).expanduser(); text = extract_text(p)
+        t = time.time(); out = chat("Summarize this text in 3 sentences or fewer. Do not add outside information.\n\nText:\n" + text, 200); s = round(time.time() - t, 1)
+        dest = BASE / "private-output" / (p.stem + ".md"); dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f"# LOCAL ONLY - never sent to cloud\n\nSource file: {p.name}\nDate: {time.strftime('%Y-%m-%d')}\n\n{out}\n")
+        print("LOCAL ONLY, processed on this machine, no cloud call made."); print(out); print(f"\nSaved: {dest} [{s}s, no cache]")
+    elif cmd == "triage":
+        if len(sys.argv) < 3: usage()
+        p = Path(sys.argv[2]).expanduser(); text = extract_text(p)
+        prompt = ("Return JSON only with these fields: title, summary_1_sentence, topics (up to 5), entities (up to 10), "
+                  "para_suggestion (one of: 1-Projects for an active project with a deadline, 2-Areas for an ongoing responsibility, 3-Resources for reference material to learn from, 4-Archives for completed or inactive material; a toolkit module is 3-Resources), sensitive (true only if it contains personal names, contact details, donor info, or unpublished private data, not merely a difficult topic), sensitive_reason (short).\n\nText:\n" + text)
+        out, s, cached = chat_cached(prompt, 300)
+        dest_dir = (VAULT / "output") if VAULT.exists() else (BASE / "output"); dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"triage-{p.stem}.json"
+        try:
+            dest.write_text(json.dumps(json.loads(out), indent=2))
+        except Exception:
+            dest.write_text(out)
+        print(out); print(f"\nSaved: {dest} [local, {s}s{' cached' if cached else ''}]")
+    elif cmd == "route":
+        args = [a for a in sys.argv[2:] if a not in ("--cloud",)]
+        if not args: usage()
+        text = args[0] + (extract_text(args[1], 8000) if len(args) > 1 else "")
+        d = route_decision(text); print(json.dumps(d, indent=2))
+        if "--cloud" in sys.argv or d["decision"] == "cloud-recommended":
+            print("\nCloud lane (not run by this script): opencode run -m opencode/glm-5.3-flash-free"); return
+        out, s, cached = chat_cached(args[0], 200); print("\n" + out); print(f"\n[local, {s}s{' cached' if cached else ''}]")
+    elif cmd == "qa":
+        if len(sys.argv) < 3: usage()
+        q = sys.argv[2]
+        if len(sys.argv) > 3:
+            page = Path(sys.argv[3]).expanduser(); context = page.read_text(errors="ignore")[:6000]; source = page.name
+        else:
+            words = [w for w in re.findall(r"[a-z]+", q.lower()) if len(w) > 3 and w not in STOP]
+            best, best_n = None, 0
+            for f in sorted(VAULT.rglob("*.md")) if VAULT.exists() else []:
+                if any(x in f.parts for x in ("templates", "output", ".obsidian")) or f.name in ("log.md", "index.md", "SCHEMA.md", "AGENTS.md"): continue
+                t = f.read_text(errors="ignore").lower(); n = sum(t.count(w) for w in words)
+                if n > best_n: best, best_n = f, n
+            if not best:
+                print("No matching vault page found."); return
+            context = best.read_text(errors="ignore")[:6000]; source = best.name
+        out, s, cached = chat_cached(f"Answer only from the context below. If it is not in the context, say so. Cite the source page at the end.\n\nQuestion: {q}\n\nContext from {source}:\n{context}", 250)
+        print(out); print(f"\n[local, source: {source}, {s}s{' cached' if cached else ''}]")
+    elif cmd == "batch":
+        limit = 5; all_pages = False
+        if "--all" in sys.argv: all_pages = True
+        if "--limit" in sys.argv:
+            limit = int(sys.argv[sys.argv.index("--limit") + 1])
+        files = []
+        if VAULT.exists():
+            for f in sorted(VAULT.rglob("*.md")):
+                if any(x in f.parts for x in ("templates", "output", ".obsidian")) or f.name in ("log.md", "index.md", "SCHEMA.md", "AGENTS.md"): continue
+                files.append(f)
+        if not all_pages: files = files[:limit]
+        dest = (VAULT / "output" / f"local-batch-{time.strftime('%Y-%m-%d')}.md") if VAULT.exists() else (BASE / "output" / f"local-batch-{time.strftime('%Y-%m-%d')}.md")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"# Local batch report {time.strftime('%Y-%m-%d')}", "", "One small local call per page: tags and entities. Run overnight for full vaults.", ""]
+        for f in files:
+            text = f.read_text(errors="ignore")[:4000]
+            out, s, cached = chat_cached("Return JSON only: {\"tags\": [up to 5], \"entities\": [up to 8]}\n\nText:\n" + text, 150)
+            lines += [f"## {f.relative_to(VAULT) if VAULT.exists() else f.name} ({s}s{' cached' if cached else ''})", "", "```json", out, "```", ""]
+            print(f"Done: {f.name} ({s}s{' cached' if cached else ''})")
+        dest.write_text("\n".join(lines)); print(f"\nSaved: {dest} ({len(files)} pages)")
+    elif cmd == "bench":
+        print(f"RAM available before: {mem_available_gb()} GB")
+        tests = ["Say hello in one sentence.", "Extract 3 keywords as JSON only from: Philanthropy is voluntary action for the public good.", "Summarize in one sentence: A refurbished laptop runs local AI for career exploration."]
+        secs = []
+        for p in tests:
+            t = time.time(); out = chat(p, 120); s = round(time.time() - t, 1); secs.append(s); print(f"{s}s: {out}")
+        print(f"\nAverage: {round(sum(secs)/len(secs), 1)}s, RAM available after: {mem_available_gb()} GB")
+    elif cmd == "demo":
+        print("LOCAL AI DEMO - this Tiny, no internet call in this script, model on localhost:1234")
+        demos = [("Hello, in one sentence", "Say hello and say you run locally on a refurbished computer."), ("Keyword extract", "Extract 3 keywords as JSON only from: Philanthropy is voluntary action for the public good, including service, advocacy, and giving."), ("Short summary", "Summarize in one sentence: A refurbished laptop, restored by young people in Providence, now runs local AI for career exploration, with no cloud account needed.")]
+        for name, p in demos:
+            t = time.time(); out = chat(p, 120); s = round(time.time() - t, 1); print(f"\n{name} ({s}s): {out}")
+        print("\nDemo done. That is the point: local AI, on restored hardware, working offline.")
+    else:
+        usage()
+
+if __name__ == "__main__":
+    main()

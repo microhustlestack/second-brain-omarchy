@@ -1,0 +1,25 @@
+{
+  "green": [
+    "read",
+    "summarize",
+    "tags",
+    "entities",
+    "search",
+    "list",
+    "triage"
+  ],
+  "yellow": [
+    "write vault",
+    "edit vault",
+    "external message",
+    "system change"
+  ],
+  "red": [
+    "delete",
+    "money",
+    "credentials",
+    "send payment",
+    "sudo"
+  ],
+  "yellow_allowed_patterns": []
+}
