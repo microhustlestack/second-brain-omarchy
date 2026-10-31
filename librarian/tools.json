@@ -1,0 +1,16 @@
+{
+  "tools": [
+    {
+      "name": "librarian",
+      "note": "Read-only vault retrieval. Template default: proposed, pending owner approval on each machine per the agent-workspace guardrail.",
+      "reference": "~/local-ai/local-ai qa, via ~/agent-workspace/librarian/librarian",
+      "status": "proposed"
+    },
+    {
+      "name": "opencode-second-brain-skill",
+      "note": "Interactive librarian path. Skill is deployed by second-brain install; approve for librarian use on each machine.",
+      "reference": "~/.config/opencode/skills/second-brain/SKILL.md",
+      "status": "proposed"
+    }
+  ]
+}

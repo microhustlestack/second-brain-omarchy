@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Headless Second Brain librarian - this Omarchy machine
+# Usage: librarian "question" [page]
+#        librarian --index "search term"
+# Read only. Uses local-ai qa (local Qwen3 4B, no cloud call).
+set -u
+VAULT="$HOME/SecondBrain"
+QA="$HOME/local-ai/local-ai"
+if [ "${1:-}" = "--index" ]; then
+  shift
+  grep -i -- "$*" "$VAULT/index.md" || echo "No matching index lines for: $*"
+  exit 0
+fi
+if [ $# -lt 1 ]; then
+  echo 'Usage: librarian "question" [page]'
+  echo '       librarian --index "search term"'
+  exit 2
+fi
+OUT="$("$QA" qa "$@" 2>&1)"
+echo "$OUT"
+if echo "$OUT" | grep -q "No matching vault page found"; then
+  echo ""
+  echo "Index fallback (matching lines in index.md):"
+  grep -i -- "$1" "$VAULT/index.md" || echo "No matching index lines. This topic is not in the vault yet."
+fi
