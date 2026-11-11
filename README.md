@@ -220,6 +220,43 @@ AUR, move it to `depends`.
 - **State:** Vault location is remembered in
   `~/.config/second-brain/config`, overridable with `$SECOND_BRAIN_HOME`.
 
+## Companion bar plugin
+
+The `plugin/` folder holds a companion **Omarchy bar widget** (Quattro
+shell plugin, ID `io.github.microhustlestack.secondbrain`) that shows
+your vault inbox state in the bar:
+
+- **Green dot:** nothing waiting, the inbox is fully filed.
+- **Amber dot with a count:** that many files are sitting in `raw/`
+  waiting to be ingested.
+- **Grey dot:** still checking, or the `second-brain` CLI was not found.
+
+Clicking it opens the vault (`second-brain open`). The widget is
+read-only: it runs `second-brain status`, reads the pending ingestion
+count, and never writes to the vault. It works with every shipped CLI
+version, and its IPC answers from a terminal:
+
+```
+omarchy-shell io.github.microhustlestack.secondbrain status   # pending count, or unknown
+omarchy-shell io.github.microhustlestack.secondbrain refresh
+omarchy-shell io.github.microhustlestack.secondbrain launch
+```
+
+Install it from the standalone plugin repo (the edition the Omarchy
+Plugin Marketplace installs from):
+
+```
+omarchy plugin add https://github.com/microhustlestack/omarchy-second-brain-plugin
+omarchy plugin enable io.github.microhustlestack.secondbrain
+```
+
+Or install manually by copying `plugin/` to
+`~/.config/omarchy/plugins/io.github.microhustlestack.secondbrain/` and
+enabling it as above. Validated with `omarchy plugin validate` on
+Omarchy 4 and running live on the author's machine, where its status
+correctly reports the vault's real pending count. Full settings and
+removal instructions are in `plugin/README.md`.
+
 ## The execution layer: agent-workspace
 
 The vault is the memory layer. Its pair is an **agent workspace**: a folder
@@ -436,6 +473,7 @@ share/template/          The vault skeleton (installed read-only)
 share/agent-workspace/   Execution layer template (workflows, task triads)
 docs/                    Model swap durability checklist
 share/skills/second-brain/SKILL.md   Agent skill definition
+plugin/                  Companion Omarchy bar widget (manifest.json, BarWidget.qml)
 share/applications/      Launcher desktop entry
 contrib/systemd/         Lint timer (weekly), ingest path watcher (real-time),
                          ingest timer (nightly 02:00 batch)
