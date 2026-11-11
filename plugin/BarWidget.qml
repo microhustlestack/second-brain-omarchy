@@ -6,18 +6,20 @@ import qs.Ui
 
 // Second Brain companion widget for the Omarchy bar.
 //
-// Shows the state of your Second Brain vault inbox as a status dot next
-// to a label: it runs `second-brain status` (from the WSTUNLTD™ Second
-// Brain Omarchy package) and reads the pending ingestion count, the
-// number of files sitting in the vault's raw/ folder that have not been
-// filed into the wiki yet.
+// Shows your Second Brain vault inbox state as a brain icon that
+// changes color. It runs `second-brain status` (from the WSTUNLTD
+// Second Brain Omarchy package) and reads the pending ingestion count,
+// the number of files sitting in the vault's raw/ folder that have not
+// been filed into the wiki yet. The brain glyph is the Material Design
+// brain from the bar's own Nerd Font, so its color is set directly:
 //
 //   green  nothing waiting, the inbox is fully filed
-//   amber  files are waiting, and the count shows next to the label
+//   amber  files are waiting, and the count shows next to the brain
 //   grey   still checking, or the second-brain CLI was not found
 //
-// Clicking the widget opens the vault (`second-brain open` by default,
-// which opens it in Obsidian where available).
+// There is no text label by default: the brain is the label. Clicking
+// the widget opens the vault (`second-brain open` by default, which
+// opens it in Obsidian where available).
 //
 // The widget is read-only: it runs the status command and the launch
 // command you configure. It never writes to the vault.
@@ -30,8 +32,7 @@ BarWidget {
   id: root
   moduleName: "io.github.microhustlestack.secondbrain"
 
-  readonly property string label: setting("label", "Brain")
-  readonly property bool showLabel: setting("showLabel", true)
+  readonly property bool showCount: setting("showCount", true)
   readonly property int refreshSeconds: setting("refreshSeconds", 60)
   readonly property string launchCommand: setting("launchCommand", "second-brain open")
 
@@ -39,7 +40,8 @@ BarWidget {
   // count is unknown: still checking, or the CLI is not installed.
   property int pending: -1
 
-  readonly property color dotColor: pending < 0 ? "#888888" : (pending === 0 ? "#7fc348" : "#e8a13a")
+  // The brain icon takes this color, so the state reads at a glance.
+  readonly property color stateColor: pending < 0 ? "#888888" : (pending === 0 ? "#7fc348" : "#e8a13a")
   readonly property color fg: bar ? bar.barForeground : Color.foreground
 
   function refresh() {
@@ -89,30 +91,22 @@ BarWidget {
   Row {
     id: row
     anchors.centerIn: parent
-    spacing: 6
-
-    Rectangle {
-      anchors.verticalCenter: parent.verticalCenter
-      width: 8
-      height: 8
-      radius: 4
-      color: root.dotColor
-    }
+    spacing: 5
 
     Text {
       anchors.verticalCenter: parent.verticalCenter
-      visible: root.showLabel && !root.vertical
-      text: root.label
-      color: root.fg
+      visible: !root.vertical
+      text: "󰧑"
+      color: root.stateColor
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
-      font.pixelSize: Style.font.body
+      font.pixelSize: 17
     }
 
     Text {
       anchors.verticalCenter: parent.verticalCenter
-      visible: root.pending > 0 && !root.vertical
+      visible: root.showCount && root.pending > 0 && !root.vertical
       text: String(root.pending)
-      color: root.dotColor
+      color: root.stateColor
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Style.font.body
       font.bold: true

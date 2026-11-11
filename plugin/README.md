@@ -2,11 +2,13 @@
 
 A bar widget for [Omarchy](https://omarchy.org) 4 (Quattro) that shows the state of your [Second Brain](https://github.com/microhustlestack/second-brain-omarchy) vault inbox, and opens the vault when you click it.
 
-The widget runs `second-brain status` (from the WSTUNLTD™ Second Brain Omarchy by JJUANtheBRAND™ package) and reads the pending ingestion count: the number of files sitting in your vault's `raw/` folder that have not been filed into the wiki yet. It shows that state as a status dot in the bar:
+The widget runs `second-brain status` (from the WSTUNLTD™ Second Brain Omarchy by JJUANtheBRAND™ package) and reads the pending ingestion count: the number of files sitting in your vault's `raw/` folder that have not been filed into the wiki yet. It shows that state as a brain icon in the bar that changes color. The brain is a glyph from the bar's own Nerd Font, so the color is set directly on the icon:
 
-- Green: nothing waiting, the inbox is fully filed
-- Amber, with a count: files are waiting to be ingested
-- Grey: still checking, or the `second-brain` CLI was not found
+- Green brain: nothing waiting, the inbox is fully filed
+- Amber brain, with a count next to it: files are waiting to be ingested
+- Grey brain: still checking, or the `second-brain` CLI was not found
+
+There is no text label: the brain is the label.
 
 It is the companion plugin to the [WSTUNLTD™ Second Brain Omarchy package](https://github.com/microhustlestack/second-brain-omarchy), the Arch package that installs the vault template, the CLI, and the agent skill on Omarchy. The widget also lives inside that repository under `plugin/`; this repository is the standalone edition the Omarchy plugin system installs from.
 
@@ -41,8 +43,7 @@ Set inline on the widget's entry in `~/.config/omarchy/shell.json`, or through t
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `label` | `Brain` | Text shown next to the status dot |
-| `showLabel` | `true` | Off shows only the status dot and count |
+| `showCount` | `true` | Off hides the pending count next to the brain icon |
 | `refreshSeconds` | `60` | How often the vault inbox state is checked (15 to 600) |
 | `launchCommand` | `second-brain open` | Command run when the widget is clicked |
 

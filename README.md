@@ -224,12 +224,14 @@ AUR, move it to `depends`.
 
 The `plugin/` folder holds a companion **Omarchy bar widget** (Quattro
 shell plugin, ID `io.github.microhustlestack.secondbrain`) that shows
-your vault inbox state in the bar:
+your vault inbox state in the bar as a brain icon that changes color.
+The brain is a glyph from the bar's own Nerd Font, so the color is set
+directly on the icon, and there is no text label:
 
-- **Green dot:** nothing waiting, the inbox is fully filed.
-- **Amber dot with a count:** that many files are sitting in `raw/`
+- **Green brain:** nothing waiting, the inbox is fully filed.
+- **Amber brain with a count:** that many files are sitting in `raw/`
   waiting to be ingested.
-- **Grey dot:** still checking, or the `second-brain` CLI was not found.
+- **Grey brain:** still checking, or the `second-brain` CLI was not found.
 
 Clicking it opens the vault (`second-brain open`). The widget is
 read-only: it runs `second-brain status`, reads the pending ingestion
