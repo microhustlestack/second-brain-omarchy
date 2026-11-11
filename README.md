@@ -36,6 +36,34 @@ her own files. When a group project starts, she makes a task folder,
 drops in the rubric and the group chat notes, and the AI helps draft the
 work, check the facts, and keep the deadline in sight.
 
+## General applications: who this is for
+
+The method is generic. Anyone whose information is scattered across
+apps, downloads, screenshots, and chat threads can run the same system:
+
+- **Students.** Class notes, assignment rubrics, group project threads,
+  and work schedules in one place. Ask "what is due this week, and what
+  am I missing?" and get an answer from your own files.
+- **Small business owners and side hustlers.** Supplier prices, customer
+  messages, receipts, and product notes filed once and linked forever,
+  instead of buried in a camera roll and three inboxes.
+- **Creators.** Scripts, sponsorship terms, episode notes, and asset
+  links organized by project, with a workspace task for every piece of
+  content from draft to published.
+- **Nonprofits and community teams.** Grant deadlines, partner contacts,
+  event plans, and board decisions that survive staff changes, because
+  the knowledge lives in files the organization owns, not in one
+  person's accounts.
+- **Developers and builders.** A local memory for every project you
+  maintain: decisions, setup steps, and gotchas, queryable offline.
+  See the backup patterns below for how this pairs with git.
+- **Families and home users.** Manuals, warranties, school paperwork,
+  medical visit notes, and household projects, kept on a home machine
+  instead of a subscription notes app.
+- **Anyone who works with an AI assistant.** Your conversations with an
+  AI contain real decisions and real work. The backup pattern below
+  turns them into organized, searchable records you own.
+
 The system it packages:
 
 | Layer | Owns |
@@ -307,6 +335,76 @@ for owners who want a human glance before an agent touches the vault.
 Renaming a processed raw file makes it look new (its ledger entry names
 the old path). The agent's index check catches the duplicate; rename the
 ledger entry if you rename the source.
+
+## Backup patterns: using the Second Brain as a local backup
+
+The vault is plain markdown in folders you own, so it doubles as a
+local backup layer. Two patterns are proven in daily use by this
+project's author. Both follow the workflow rule baked into the method:
+**working files live in `~/Projects/<project>/`, and the vault holds a
+note in `1-Projects/` that points to them and records the decisions.**
+
+### Pattern 1: back up a code project (example: OmaMetaMuse)
+
+A public git repo is a cloud copy, not a backup you control. The local
+backup works like this:
+
+1. Keep a **full git clone** of the project on your own machine, in
+   `~/Projects/<project>/`. A clone carries the complete history, not
+   just today's files.
+2. Keep a **project note in the vault** (`~/SecondBrain/1-Projects/`)
+   pointing to the clone, recording what the project is, the key
+   decisions (renames, releases, design choices), and what is still
+   open. Code shows what was built. The note remembers why.
+3. The local model can answer questions about the project offline,
+   from the note and the clone, with no cloud account involved.
+4. **Refresh** by running `git pull` in the clone. **Restore** by
+   pushing the same clone to a new repo if the original host or
+   account is ever lost.
+
+Worked example: OmaMetaMuse (a Muse launcher package for Omarchy,
+https://github.com/microhustlestack/OmaMetaMuse) is backed up exactly
+this way on the author's studio machine, alongside this package.
+
+### Pattern 2: back up your AI assistant chats
+
+Long AI conversations hold decisions, drafts, and finished work, and
+most platforms give you no good way to keep them. The pattern:
+
+1. For each conversation, save **one summary file**: what it was about,
+   the decisions made, and the key files or links it produced. One file
+   per chat keeps it scannable. This is an organized record, not a
+   word for word transcript.
+2. File the summaries the Second Brain way: **one folder per chat or
+   project**, using the same names you see in the app, so the backup
+   mirrors the live workspace instead of inventing a second system.
+3. Store the working set in `~/Projects/<chat-backups>/` on a local
+   machine, and add a vault note in `1-Projects/` pointing to it,
+   noting the transfer method and any redactions.
+4. A nightly job can refresh only the chats that are new or changed,
+   verify transfers with a SHA-256 hash check, and stay silent unless
+   something fails or something new lands.
+5. Keep private chat records off cloud drives by default. Move them
+   device to device, or encrypt before any cloud copy. The author's
+   setup moves these summaries device to device only, with a redaction
+   check on sensitive files before anything ships.
+
+This pattern works with any AI assistant whose conversations you can
+read back, including Meta's Muse, because the record is just markdown
+summaries you write and own.
+
+### What these backups are, and are not
+
+- They **are** local, plain-file, fully restorable records of your
+  projects and your AI work, independent of any one company or account.
+- They are **not** automatic sync. Refreshing a clone or a chat backup
+  is a deliberate step (or a scheduled job you set up and can inspect).
+- They are **not** verbatim archives. Summaries capture decisions and
+  outputs. If you need full transcripts, also keep the platform's own
+  data export.
+- The vault itself should follow the same rule it teaches: keep at
+  least two copies on different devices, and treat any cloud copy as
+  your choice, not a default.
 
 ## For AI appliances (bake-in)
 
